@@ -1,0 +1,21 @@
+name: Nightly Pipeline
+on:
+  schedule: [{ cron: "7 6 * * *" }]
+  workflow_dispatch:
+jobs:
+  etl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install -r requirements.txt
+      - env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EUDK_RAW_URL: https://raw.githubusercontent.com/eudk/awesome-ai-tools/main/README.md
+        run: |
+          python -m pipeline.bronze_md_eudk
+          python -m pipeline.bronze_csv_ingest
+          python -m pipeline.silver_normalize
+          python -m pipeline.gold_dedupe
+          python -m pipeline.load_pg
