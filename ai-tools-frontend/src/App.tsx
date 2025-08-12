@@ -1,9 +1,17 @@
+import { useAuth } from "./auth";
+import SignInModal from "./SignInModal";
 import { useEffect, useMemo, useState } from "react";
 import { searchTools, getStats } from "./api";
 import type { Tool } from "./types";
-import "./index.css"; // tailwind is imported here
+import "./index.css"; // tailwind
 
-function ToolCard({ tool }: { tool: Tool }) {
+function ToolCard({
+  tool,
+  onClick,
+}: {
+  tool: Tool;
+  onClick: (t: Tool) => void;
+}) {
   const domain = useMemo(() => {
     try {
       return tool.url ? new URL(tool.url).hostname : "";
@@ -13,14 +21,14 @@ function ToolCard({ tool }: { tool: Tool }) {
   }, [tool.url]);
 
   return (
-    <a
-      href={tool.url ?? "#"}
-      target="_blank"
-      rel="noreferrer"
-      className="block rounded-2xl border border-zinc-800 bg-zinc-900/70 p-4 shadow-sm ring-1 ring-black/5 transition hover:border-zinc-700 hover:shadow-md"
+    <button
+      onClick={() => onClick(tool)}
+      className="block w-full rounded-2xl border border-zinc-800 bg-zinc-900/70 p-4 text-left shadow-sm ring-1 ring-black/5 transition hover:border-zinc-700 hover:shadow-md"
     >
       <div className="mb-1 text-sm text-zinc-400">{domain}</div>
-      <h3 className="line-clamp-1 text-lg font-semibold text-zinc-100">{tool.name}</h3>
+      <h3 className="line-clamp-1 text-lg font-semibold text-zinc-100">
+        {tool.name}
+      </h3>
       <p className="mt-2 line-clamp-3 text-sm text-zinc-300/80">
         {tool.description || "—"}
       </p>
@@ -28,13 +36,16 @@ function ToolCard({ tool }: { tool: Tool }) {
       {(tool.categories?.length ?? 0) > 0 && (
         <div className="mt-3 flex flex-wrap gap-2">
           {tool.categories!.slice(0, 3).map((c) => (
-            <span key={c} className="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-300">
+            <span
+              key={c}
+              className="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-300"
+            >
               {c}
             </span>
           ))}
         </div>
       )}
-    </a>
+    </button>
   );
 }
 
@@ -126,6 +137,8 @@ function Pagination({
 }
 
 export default function App() {
+  const { user, openAuthModal, signOut, requireAuth } = useAuth();
+
   const [q, setQ] = useState("");
   const [pendingQ, setPendingQ] = useState("");
   const [items, setItems] = useState<Tool[]>([]);
@@ -136,6 +149,7 @@ export default function App() {
   const [err, setErr] = useState<string | null>(null);
 
   const page = Math.floor(offset / limit) + 1;
+  const totalPages = total ? Math.max(1, Math.ceil(total / limit)) : 1;
 
   useEffect(() => {
     let cancelled = false;
@@ -161,19 +175,48 @@ export default function App() {
     };
   }, [q, limit, offset]);
 
-  // pagination is handled by the numbered component below
-
-  const totalPages = total ? Math.max(1, Math.ceil(total / limit)) : 1;
+  // gated click: prompt auth if needed, otherwise open link
+  const handleToolClick = (t: Tool) => {
+    requireAuth(() => {
+      if (t.url) window.open(t.url, "_blank", "noopener,noreferrer");
+    });
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-zinc-950 to-zinc-900 text-zinc-100">
+      {/* Top bar with auth controls */}
       <header className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-950/70 backdrop-blur">
-        <div className="mx-auto max-w-6xl px-4 py-8">
-          <h1 className="text-center text-3xl font-extrabold tracking-tight">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4">
+          <h1 className="text-lg font-semibold">AI Tools</h1>
+          <div className="space-x-2 text-sm">
+            {user ? (
+              <>
+                <span className="text-zinc-400">{user.email}</span>
+                <button
+                  onClick={signOut}
+                  className="rounded bg-zinc-800 px-3 py-1 hover:bg-zinc-700"
+                >
+                  Sign out
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={openAuthModal}
+                className="rounded bg-indigo-600 px-3 py-1 hover:bg-indigo-500"
+              >
+                Sign in
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="mx-auto max-w-6xl px-4 pb-6">
+          <h2 className="text-center text-3xl font-extrabold tracking-tight">
             <span className="bg-gradient-to-r from-indigo-400 to-fuchsia-400 bg-clip-text text-transparent">
               Need to find an AI to complete a specific task?
             </span>
-          </h1>
+          </h2>
+
           <form
             className="mx-auto mt-5 flex w-full max-w-3xl items-center gap-2"
             onSubmit={(e) => {
@@ -199,8 +242,14 @@ export default function App() {
           <div className="mt-3 text-center text-sm text-zinc-400">
             {total != null && (
               <>
-                Showing <span className="font-medium text-zinc-200">{items.length}</span> of{" "}
-                <span className="font-medium text-zinc-200">{total.toLocaleString()}</span>{" "}
+                Showing{" "}
+                <span className="font-medium text-zinc-200">
+                  {items.length}
+                </span>{" "}
+                of{" "}
+                <span className="font-medium text-zinc-200">
+                  {total.toLocaleString()}
+                </span>{" "}
                 tools {q ? <>for “{q}”</> : null}
               </>
             )}
@@ -223,7 +272,7 @@ export default function App() {
           <>
             <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 md:grid-cols-3">
               {items.map((t) => (
-                <ToolCard key={t.id} tool={t} />
+                <ToolCard key={t.id} tool={t} onClick={handleToolClick} />
               ))}
             </div>
 
@@ -238,9 +287,12 @@ export default function App() {
 
       <footer className="mt-8 border-t border-zinc-800/80 bg-zinc-950/60">
         <div className="mx-auto max-w-6xl px-4 py-6 text-center text-sm text-zinc-500">
-          Built on your AI Tools Catalog API.
+          Built for people who want to find the best AI tools for their needs.
         </div>
       </footer>
+
+      {/* Auth modal lives at root so it can pop from anywhere */}
+      <SignInModal />
     </div>
   );
 }
