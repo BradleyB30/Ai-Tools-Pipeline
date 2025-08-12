@@ -4,7 +4,7 @@ WHEN: Start after ETL has populated the database.
 
 INPUTS → OUTPUTS:
 - INPUTS: DATABASE_URL (Postgres), ALLOWED_ORIGINS (CORS)
-- OUTPUTS: /health, /search, /tool/{id}, /stats
+- OUTPUTS: /health, /search, /tool/{id}, /stats, /categories
 """
 
 from typing import Optional, List
@@ -17,19 +17,21 @@ from pydantic import BaseModel
 from sqlalchemy import create_engine, text
 
 # --- Env & DB URL fix ---------------------------------------------------------
-load_dotenv()  # read .env in dev
+load_dotenv()  # Loads .env during local dev so DATABASE_URL/ALLOWED_ORIGINS are available.
 
 db_url = os.getenv("DATABASE_URL", "")
 if not db_url:
     raise SystemExit("DATABASE_URL not set")
 
-# Force SQLAlchemy to use psycopg v3 instead of psycopg2
+# Use psycopg (v3) driver explicitly so we don't need psycopg2.
 if db_url.startswith("postgresql://"):
     db_url = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
 
+# pool_pre_ping=True avoids "stale connection" errors by pinging before use.
 engine = create_engine(db_url, pool_pre_ping=True, future=True)
 
 # --- App & CORS ---------------------------------------------------------------
+# Parse allowed origins from env. You can set "*" to allow all.
 origins = [
     o.strip() for o in os.getenv(
         "ALLOWED_ORIGINS",
@@ -49,6 +51,10 @@ app.add_middleware(
 
 # --- Models -------------------------------------------------------------------
 class ToolOut(BaseModel):
+    """
+    Pydantic model that documents the shape of a tool record we return.
+    It doesn't affect the SQL—just the response schema and docs.
+    """
     id: str
     name: str
     url: Optional[str] = None
@@ -59,65 +65,144 @@ class ToolOut(BaseModel):
 # --- Routes -------------------------------------------------------------------
 @app.get("/health")
 def health():
-    # Simple DB ping
+    """
+    Quick DB heartbeat. If this returns {"ok": true}, DB creds/connection are good.
+    """
     with engine.begin() as conn:
         conn.execute(text("select 1"))
     return {"ok": True}
 
-@app.get("/search")
-def search(q: str = "", limit: int = 20, offset: int = 0):
-    q = (q or "").strip()
-    with engine.begin() as conn:
-        if q:
-            rows = conn.execute(text("""
-                select id, name, url, description, tags, categories
-                from tools
-                where tsv @@ plainto_tsquery('english', :q)
-                   or name ilike :like
-                   or description ilike :like
-                order by ts_rank_cd(tsv, plainto_tsquery('english', :q)) desc, updated_at desc
-                limit :limit offset :offset
-            """), {"q": q, "like": f"%{q}%", "limit": limit, "offset": offset}).mappings().all()
-        else:
-            rows = conn.execute(text("""
-                select id, name, url, description, tags, categories
-                from tools
-                order by updated_at desc
-                limit :limit offset :offset
-            """), {"limit": limit, "offset": offset}).mappings().all()
 
-    return {"items": [dict(r) for r in rows], "q": q, "limit": limit, "offset": offset}
+@app.get("/search")
+def search(
+    q: str = "",
+    category: Optional[str] = None,
+    has_api: Optional[bool] = None,
+    has_free: Optional[bool] = None,
+    domain: Optional[str] = None,
+    limit: int = 20,
+    offset: int = 0,
+):
+    """
+    Search endpoint with optional filters.
+    Adds `has_more` by fetching limit+1 and trimming.
+    """
+    # bounds
+    limit = max(1, min(limit, 100))
+    offset = max(0, offset)
+    q = (q or "").strip()
+
+    # dynamic WHERE
+    where = []
+    params = {"limit": limit + 1, "offset": offset}  # NOTE: ask DB for one extra row
+    if q:
+        where.append("(tsv @@ plainto_tsquery('english', :q) OR name ILIKE :like OR description ILIKE :like)")
+        params["q"] = q
+        params["like"] = f"%{q}%"
+    if category:
+        where.append(":category = ANY(categories)")
+        params["category"] = category
+    if has_api is not None:
+        where.append("has_api = :has_api")
+        params["has_api"] = has_api
+    if has_free is not None:
+        where.append("has_free = :has_free")
+        params["has_free"] = has_free
+    if domain:
+        where.append("domain = :domain")
+        params["domain"] = domain
+
+    # base SQL
+    base_sql = """
+        SELECT id, name, url, description, tags, categories
+        FROM tools
+    """
+    if where:
+        base_sql += " WHERE " + " AND ".join(where)
+
+    if q:
+        base_sql += """
+            ORDER BY ts_rank_cd(tsv, plainto_tsquery('english', :q)) DESC,
+                     updated_at DESC
+        """
+    else:
+        base_sql += " ORDER BY updated_at DESC"
+
+    base_sql += " LIMIT :limit OFFSET :offset"
+
+    # query
+    with engine.begin() as conn:
+        rows = conn.execute(text(base_sql), params).mappings().all()
+
+    # trim to requested page size, compute has_more
+    items = [dict(r) for r in rows[:limit]]
+    has_more = len(rows) > limit
+
+    return {
+        "items": items,
+        "q": q,
+        "category": category,
+        "has_api": has_api,
+        "has_free": has_free,
+        "domain": domain,
+        "limit": limit,
+        "offset": offset,
+        "has_more": has_more,
+    }
+
 
 @app.get("/tool/{tool_id}")
 def tool(tool_id: str):
+    """
+    Fetch a single tool by UUID. Returns 404-style payload if not found.
+    """
     with engine.begin() as conn:
         r = conn.execute(text("""
-            select id, name, url, description, tags, categories, domain, first_seen, updated_at
-            from tools
-            where id = :id
+            SELECT id, name, url, description, tags, categories, domain, first_seen, updated_at
+            FROM tools
+            WHERE id = :id
         """), {"id": tool_id}).mappings().first()
     return dict(r) if r else {"error": "not found"}
+
 
 @app.get("/stats")
 def stats():
     with engine.begin() as conn:
-        total = conn.execute(text("select count(*) from tools")).scalar_one()
+        total = conn.execute(text("SELECT count(*) FROM tools")).scalar_one()
         by_cat = conn.execute(text("""
-            with cats as (
-              select u.cat
-              from tools t
-              left join lateral unnest(
-                case
-                  when t.categories is null or array_length(t.categories, 1) = 0
-                    then array['uncategorized']::text[]
-                  else t.categories
-                end
-              ) as u(cat) on true
-            )
-            select cat, count(*) as n
-            from cats
-            group by cat
-            order by n desc
-            limit 20
+            SELECT cat, COUNT(*) AS n
+            FROM (
+              SELECT unnest(
+                CASE
+                  WHEN coalesce(cardinality(categories), 0) = 0
+                    THEN ARRAY['uncategorized']::text[]
+                  ELSE categories
+                END
+              ) AS cat
+              FROM tools
+            ) s
+            GROUP BY cat
+            ORDER BY n DESC
+            LIMIT 20
         """)).all()
     return {"total": int(total), "top_categories": [(c, int(n)) for c, n in by_cat]}
+
+
+@app.get("/categories")
+def categories():
+    with engine.begin() as conn:
+        rows = conn.execute(text("""
+            SELECT DISTINCT cat
+            FROM (
+              SELECT unnest(
+                CASE
+                  WHEN coalesce(cardinality(categories), 0) = 0
+                    THEN ARRAY['uncategorized']::text[]
+                  ELSE categories
+                END
+              ) AS cat
+              FROM tools
+            ) s
+            ORDER BY cat
+        """)).all()
+    return {"categories": [r[0] for r in rows]}
