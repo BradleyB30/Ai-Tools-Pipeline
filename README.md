@@ -32,5 +32,5 @@ Built with a **full-stack architecture** featuring a modern frontend, robust bac
 ---
 
 ## Live Link
-[https://ai-tools-pipeline.vercel.app](url)
+https://ai-tools-pipeline.vercel.app/
 
