@@ -1,15 +1,15 @@
 import { createContext, useContext, useEffect, useState } from "react";
-import type { Session, User } from "@supabase/supabase-js";
+import type { User, Session, AuthChangeEvent } from "@supabase/supabase-js";
 import { supabase } from "./supabase";
 
 type AuthCtx = {
   user: User | null;
   loading: boolean;
-  // prompt modal control
+
   openAuthModal: () => void;
   closeAuthModal: () => void;
   authOpen: boolean;
-  // helpers
+
   signIn: (email: string, password: string) => Promise<void>;
   signUp: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
@@ -24,17 +24,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [authOpen, setAuthOpen] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  // hydrate session
   useEffect(() => {
     let mounted = true;
-    supabase.auth.getSession().then(({ data }) => {
+
+    // Initial session hydrate
+    supabase.auth.getSession().then(({ data }: { data: { session: Session | null } }) => {
       if (!mounted) return;
       setUser(data.session?.user ?? null);
       setLoading(false);
     });
-    const { data: sub } = supabase.auth.onAuthStateChange((_evt, sess) => {
-      setUser(sess?.user ?? null);
-    });
+
+    // Subscribe to auth changes
+    const { data: sub } = supabase.auth.onAuthStateChange(
+      (_evt: AuthChangeEvent, sess: Session | null) => {
+        setUser(sess?.user ?? null);
+      }
+    );
+
     return () => {
       mounted = false;
       sub.subscription.unsubscribe();
@@ -49,7 +55,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signUp = async (email: string, password: string) => {
     const { error } = await supabase.auth.signUp({ email, password });
-    if (error) throw error;               // You may receive a confirm email depending on settings
+    if (error) throw error;
     setAuthOpen(false);
   };
 
