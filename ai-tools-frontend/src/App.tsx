@@ -1,5 +1,5 @@
 import { useAuth } from "./auth";
-import SignInModal from "./SignInModal";
+import SignInModal from "./signInModal";
 import { useEffect, useMemo, useState } from "react";
 import { searchTools, getStats } from "./api";
 import type { Tool } from "./types";
